@@ -1,0 +1,13 @@
+---
+title: "Scalable Demand Forecasting and Safety Stock Modelling using Forecast Error"
+author: "Maciej Lecicki"
+date: "24 10 2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
