@@ -2,7 +2,7 @@ Scalable Demand Forecasting and Safety Stock Modelling using Forecast
 Error
 ================
 Maciej Lecicki
-24 10 2021
+24.10.2021
 
 <br/> <br/> <br/>
 
@@ -119,7 +119,9 @@ elecsupply %>%
 With quick glance at all plots we can tell that demand is seasonal and
 there’s upward trend in demand for electrical supply.
 
-<br/> ##### Time series modelling <br/>
+##### Time series modelling
+
+<br/>
 
 The goal we’d like to achieve is development of best fit demand forecast
 using available resources in R. The challenge is that we’d like to
@@ -139,10 +141,13 @@ steps.<br/>
     be cascaded to Safety Stock calculation and scenario planning,<br/>
 
 2.  We’ll also expand dataset by 12 months to forecast demand for
-    electrical supply using best model.
-3.  We’ll explore ‘classic’ time series approach and machine learning to
-    develop demand forecasting model,<br/>
-4.  We’ll look into available error metrics and enrich them by custom
+    electrical supply; it will be done by refitting best model on full
+    dataset (train + test),<br/>
+3.  We’ll explore ‘classic’ time series approach and machine learning
+    based model to develop demand forecasting model which minimizes
+    selected forecast error metric,<br/>
+4.  We’ll look into standard error metrics available in R libraries and
+    enrich metrics selection through development of own, custom
     metrics.<br/>
 
 Findings at each step of the process will be visualized using ggplot2.
@@ -150,6 +155,8 @@ This can also be used as input to Shiny web app (if required to be
 shared with user that doesn’t have access to R environment).
 
 ##### Train, test and future datasets
+
+<br/>
 
 ``` r
 nested_data_tbl <- elecsupply %>%
@@ -283,5 +290,310 @@ sense taking into account granularity (frequency) of original date and
 its format (1st day of the month, month and year) or would they rather
 confuse our machine learning model?<br/> I think it’s the latter and
 therefore let’s narrow features to correct ones taking into above.<br/>
+
+Let’s re-write our recipe and remove unwanted columns in step_rm()
+function, where we can list what needs to be de-selected, or by using !
+and - operators, what needs to be kept. Please notice that since
+character features are removed, one hot encoding is not needed anymore.
+
+``` r
+rec_xgb <- recipe(elec_demand ~ ., extract_nested_train_split(nested_data_tbl)) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(!elec_demand, -c(date_year.iso:date_month)) %>%
+  step_zv(all_predictors()) # remove zero value predictors (if there are any)
+#  step_dummy(all_nominal(), one_hot = TRUE) # not required anymore
+```
+
+Let’s take a look corrected recipe.
+
+``` r
+bake(prep(rec_xgb), extract_nested_train_split(nested_data_tbl))
+```
+
+    ## # A tibble: 149 x 5
+    ##    elec_demand date_year.iso date_half date_quarter date_month
+    ##          <dbl>         <int>     <int>        <int>      <int>
+    ##  1        6287          1990         1            1          1
+    ##  2        5546          1990         1            1          2
+    ##  3        5975          1990         1            1          3
+    ##  4        5461          1990         1            2          4
+    ##  5        5272          1990         1            2          5
+    ##  6        5171          1990         1            2          6
+    ##  7        4735          1990         2            3          7
+    ##  8        5132          1990         2            3          8
+    ##  9        5293          1990         2            3          9
+    ## 10        5869          1990         2            4         10
+    ## # ... with 139 more rows
+
+By default, it returns train set for first aggregation field (country in
+our case). It’s possible however to check recipe for any country as
+shown below.
+
+``` r
+bake(prep(rec_xgb), extract_nested_train_split(nested_data_tbl %>%
+                                                 filter(country == 'Denmark')))
+```
+
+    ## # A tibble: 149 x 5
+    ##    elec_demand date_year.iso date_half date_quarter date_month
+    ##          <dbl>         <int>     <int>        <int>      <int>
+    ##  1        3166          1990         1            1          1
+    ##  2        2737          1990         1            1          2
+    ##  3        2906          1990         1            1          3
+    ##  4        2550          1990         1            2          4
+    ##  5        2532          1990         1            2          5
+    ##  6        2398          1990         1            2          6
+    ##  7        2116          1990         2            3          7
+    ##  8        2635          1990         2            3          8
+    ##  9        2587          1990         2            3          9
+    ## 10        2850          1990         2            4         10
+    ## # ... with 139 more rows
+
+We now have recipe for Machine Learning. Classic time series algorithms
+don’t require data preprocessing thus saving recipe to an object. <br/>
+Next step is create workflows, which are containers that aggregate
+information required to fit and predict from a model. We’ll build one
+machine learning workflow and four others that cover more standard time
+series based models.
+
+1.  boosted_tree workflow.
+
+Like any other ML algorithm, xgboost has hyperparameters.
+Hyperparameters tuning is out of scope, however just to show how it’s
+done using tidymodels library. Detailed process can be found under below
+link:
+<https://towardsdatascience.com/dials-tune-and-parsnip-tidymodels-way-to-create-and-tune-model-parameters-c97ba31d6173>
+
+``` r
+tune_spec <- boost_tree(
+  learn_rate = tune(),
+  trees = tune(),
+  mtry = tune(),
+  tree_depth = tune()
+) %>%
+  set_engine('xgboost') %>%
+  set_mode('regression')
+#
+folds_3 <- vfold_cv(extract_nested_train_split(nested_data_tbl),
+                    v = 3)
+
+wflw_xgb_1 <- workflow() %>%
+  add_model(tune_spec) %>%
+  add_recipe(rec_xgb)
+
+set.seed(300)
+wflw_xgb_1_tune <- wflw_xgb_1 %>%
+  tune_grid(
+    resamples = folds_3,
+    grid = 3
+  )
+
+wflw_xgb_1_tuned <- finalize_workflow(wflw_xgb_1,
+                                      select_best(wflw_xgb_1_tune))
+
+# optimal hyperparameters
+wflw_xgb_1_tuned
+```
+
+    ## == Workflow ===============================================================
+    ## Preprocessor: Recipe
+    ## Model: boost_tree()
+    ## 
+    ## -- Preprocessor -----------------------------------------------------------
+    ## 3 Recipe Steps
+    ## 
+    ## * step_timeseries_signature()
+    ## * step_rm()
+    ## * step_zv()
+    ## 
+    ## -- Model ------------------------------------------------------------------
+    ## Boosted Tree Model Specification (regression)
+    ## 
+    ## Main Arguments:
+    ##   mtry = 3
+    ##   trees = 1085
+    ##   tree_depth = 10
+    ##   learn_rate = 0.00275270800743389
+    ## 
+    ## Computational engine: xgboost
+
+As for our workflow, we’re only specify learn_rate parameter leaving all
+else to default values.
+
+``` r
+wflw_xgb <- workflow() %>%
+  add_model(boost_tree("regression",
+                       learn_rate = 0.03)
+            %>% set_engine("xgboost")) %>%
+  add_recipe(rec_xgb)
+```
+
+2.  Temporal Hierarchical Forecasting (THIEF) workflow<br/>
+
+All key information about it can be found under below link:<br/>
+<https://robjhyndman.com/hyndsight/thief/>
+
+As for the worklfow itself, notice difference in recipe between xgboost
+and non-ML workflows.
+
+``` r
+wflw_thief <- workflow() %>%
+  add_model(temporal_hierarchy() %>%
+              set_engine("thief")) %>%
+  add_recipe(recipe(elec_demand ~ ., extract_nested_train_split(nested_data_tbl)))
+```
+
+In above code, ‘elec_demand \~ .’ formula could be replaced by
+‘elec_demand \~ date’ as date is the only predictor (historic demand).
+The same applies to all remaining recipies in below workflows.
+
+3.  Exponential smoothing workflow
+
+``` r
+wfl_exp_s <- workflow() %>%
+  add_model(exp_smoothing() %>%
+              set_engine("ets")) %>%
+  add_recipe(recipe(elec_demand ~ date, extract_nested_train_split(nested_data_tbl)))
+```
+
+4.  (S)ARIMA workflow
+
+``` r
+wfl_arima <- workflow() %>%
+  add_model(arima_reg() %>%
+              set_engine("auto_arima")) %>%
+  add_recipe(recipe(elec_demand ~ ., extract_nested_train_split(nested_data_tbl)))
+```
+
+auto_arima engine is used which means that autoregression, moving
+average and seasonal parameters will be auto-tuned.
+
+5.  Prophet workflow
+
+“Prophet implements a procedure for forecasting time series data based
+on an additive model where non-linear trends are fit with yearly,
+weekly, and daily seasonality, plus holiday effects. It works best with
+time series that have strong seasonal effects and several seasons of
+historical data. Prophet is robust to missing data and shifts in the
+trend, and typically handles outliers well.”
+
+source: <https://cran.r-project.org/web/packages/prophet/index.html>
+
+``` r
+wfl_prophet <- workflow() %>%
+  add_model(prophet_reg() %>%
+              set_engine("prophet")) %>%
+  add_recipe(recipe(elec_demand ~ ., extract_nested_train_split(nested_data_tbl)))
+```
+
+Now that we have all workflows, they can be fit by using
+modeltime_nested_fit() function from modeltime package. The beauty of
+this solution is its scalability. <br/> What it means? It means that
+we’ll in fact build five different models per country. <br/> Before
+that, good practice is to fit them on a single dataset (country) and
+inspect for any potential errors (usually driven by data quality, namely
+completeness). Let’s do it!<br/>
+
+To check for errors we can use below code.
+
+``` r
+try_sample_tbl %>%
+  extract_nested_error_report()
+```
+
+    ## # A tibble: 0 x 4
+    ## # ... with 4 variables: country <chr>, .model_id <int>, .model_desc <chr>,
+    ## #   .error_desc <chr>
+
+Our workflows are errors-free so let’s fit them on full dataset. Fitting
+models can take some time. We can shorten it allowing parallel run on
+PC’s cores. To do that (and first to check for number of cores,
+functions from parallel library can be used - commented out in below
+code). Alternatively we can set allow_par argument to TRUE will have
+similar effect (although recommended is using parallel_start() function
+with relevant number of cores.
+
+``` r
+# parallel::detectCores()
+# starting 4 clusters for parallel run
+# parallel_start(4)
+
+nested_modeltime_tbl <- nested_data_tbl %>%
+  modeltime_nested_fit(
+    model_list = list(
+      wflw_xgb,
+      wflw_thief,
+      wfl_exp_s,
+      wfl_arima,
+      wfl_prophet
+    ),
+    control = control_nested_fit(
+      verbose = FALSE,
+      allow_par = TRUE
+    )
+  )
+# parallel_stop()
+```
+
+We haven’t specified any metrics in modeltime_nested_fit() function and
+hence default set of numeric metrics for regression models will be
+provided. Customized list of metrics can be specified through metric_set
+parameter (we’ll get back to this at later stage).<br/>
+
+Having fit models for all countries we can asses their accuracy using
+available metrics. Evaluation is done on TEST set.
+table_nested_test_accuracy() function creates nice html table with all
+metrics per model per country (I’ll comment it out to simplify output
+and the size of .md file)
+
+``` r
+nested_modeltime_tbl %>%
+  extract_nested_test_accuracy() # %>%
+```
+
+    ## # A tibble: 60 x 10
+    ##    country .model_id .model_desc     .type    mae  mape   mase smape   rmse
+    ##    <chr>       <int> <chr>           <chr>  <dbl> <dbl>  <dbl> <dbl>  <dbl>
+    ##  1 Belgium         1 XGBOOST         Test  5052.  66.1  14.2   98.9  5086. 
+    ##  2 Belgium         2 TEMPORAL HIERA~ Test   166.   2.19  0.466  2.17  194. 
+    ##  3 Belgium         3 ETSMAA          Test   145.   1.91  0.409  1.90  181. 
+    ##  4 Belgium         4 ARIMA           Test   182.   2.41  0.512  2.38  220. 
+    ##  5 Belgium         5 PROPHET         Test   130.   1.71  0.367  1.71  164. 
+    ##  6 Denmark         1 XGBOOST         Test  1997.  63.8   9.90  93.9  2023. 
+    ##  7 Denmark         2 TEMPORAL HIERA~ Test    60.8  1.96  0.302  1.99   77.5
+    ##  8 Denmark         3 ETSMADA         Test    63.0  2.02  0.313  2.06   79.5
+    ##  9 Denmark         4 ARIMA           Test    88.0  2.75  0.436  2.81  108. 
+    ## 10 Denmark         5 PROPHET         Test    84.7  2.71  0.420  2.77  104. 
+    ## # ... with 50 more rows, and 1 more variable: rsq <dbl>
+
+``` r
+  # table_modeltime_accuracy()
+```
+
+At this stage we can also select best model per country. Default metric
+is ‘rmse’ but this can be also specified through metric parameter inside
+modeltime_nested_select_best() function.
+
+``` r
+nested_best_tbl <- nested_modeltime_tbl %>%
+  modeltime_nested_select_best() # try metric = "mae"
+```
+
+Object nested_best_tbl holds information about best models. It can be
+used to create forecast…
+
+``` r
+nested_best_tbl_extract <- nested_best_tbl %>%
+    extract_nested_test_forecast()
+```
+
+… which, together with errors measured on test set, can be investigated
+visually.<br/> It’s important step as it’s valuable input to Supply
+Planning and Safety Stock calculation. We can also learn more about our
+models and also reveal some weaknesses of a single error metric (however
+good it is, like rmse) which can lead to further improvement or change
+of demand forecasting method.<br/> As we’ll see shortly, it may require
+building customized metrics. Luckily, parsley library provides all
+necessary tools to do that. <br/>
 
 TO BE CONTINUED.
