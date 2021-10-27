@@ -562,12 +562,12 @@ nested_modeltime_tbl %>%
     ## # A tibble: 60 x 10
     ##    country .model_id .model_desc  .type   mae  mape  mase smape  rmse   rsq
     ##    <chr>       <int> <chr>        <chr> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
-    ##  1 Belgium         1 XGBOOST      Test  206.   2.58 0.579  2.63 286.  0.845
+    ##  1 Belgium         1 XGBOOST      Test  215.   2.71 0.605  2.77 292.  0.842
     ##  2 Belgium         2 TEMPORAL HI~ Test  166.   2.19 0.466  2.17 194.  0.933
     ##  3 Belgium         3 ETSMAA       Test  145.   1.91 0.409  1.90 181.  0.928
     ##  4 Belgium         4 ARIMA        Test  182.   2.41 0.512  2.38 220.  0.918
     ##  5 Belgium         5 PROPHET      Test  130.   1.71 0.367  1.71 164.  0.932
-    ##  6 Denmark         1 XGBOOST      Test   71.6  2.23 0.355  2.27  96.2 0.945
+    ##  6 Denmark         1 XGBOOST      Test   71.7  2.23 0.355  2.27  96.5 0.945
     ##  7 Denmark         2 TEMPORAL HI~ Test   60.8  1.96 0.302  1.99  77.5 0.970
     ##  8 Denmark         3 ETSMADA      Test   63.0  2.02 0.313  2.06  79.5 0.970
     ##  9 Denmark         4 ARIMA        Test   88.0  2.75 0.436  2.81 108.  0.964
@@ -689,10 +689,13 @@ vis_table %>%
 
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-27-1.png)<!-- -->
 
-It makes a difference, doesn’t it?<br/> **Interesting observation from
-above plots is that best results (minimizing RMSE) are achieved through
-different models, depending on a country. This shows that ‘one-fit all’
-approach doesn’t work in demand forecasting.**
+It makes a difference, doesn’t it?<br/> **There are 2 interesting
+observations from above plots.**<br/> **Firstly, best results
+(minimizing RMSE) are achieved through different models, depending on a
+country. This shows that ‘one-fit all’ approach doesn’t work in demand
+forecasting.**<br/> **Secondly, in some countries, Machine Learning
+based models deliver best results, confirming its value for demand
+forecasting.**
 
 Finally, we can inspect forecast errors. First, let’s visualize their
 distribution.
@@ -715,11 +718,11 @@ vis_table %>%
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-28-1.png)<!-- -->
 
 Indeed, distribution of errors in some countries is clearly skewed
-either to left or right. Extreme example of this is Ireland, which
-suggests presence of negative BIAS.<br/> This can be easier to notice
-using geom_density instead of geom_histogram since we only have 24
-discrete observations. As a reminder, area under density curve is 1
-(which is 100% of all probabilities for value on x-axis).
+either to left or right. Extreme example of this is Netherlands and
+Denmark, which suggests presence of positive BIAS.<br/> This can be
+easier to notice using geom_density instead of geom_histogram since we
+only have 24 discrete observations. As a reminder, area under density
+curve is 1 (which is 100% of all probabilities for value on x-axis).
 
 ``` r
 vis_table %>%
