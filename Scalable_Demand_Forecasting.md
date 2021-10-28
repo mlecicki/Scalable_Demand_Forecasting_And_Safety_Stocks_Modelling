@@ -565,12 +565,12 @@ nested_modeltime_tbl %>%
     ## # A tibble: 60 x 10
     ##    country .model_id .model_desc  .type   mae  mape  mase smape  rmse   rsq
     ##    <chr>       <int> <chr>        <chr> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
-    ##  1 Belgium         1 XGBOOST      Test  209.   2.62 0.588  2.68 289.  0.843
+    ##  1 Belgium         1 XGBOOST      Test  210.   2.65 0.591  2.70 289.  0.844
     ##  2 Belgium         2 TEMPORAL HI~ Test  166.   2.19 0.466  2.17 194.  0.933
     ##  3 Belgium         3 ETSMAA       Test  145.   1.91 0.409  1.90 181.  0.928
     ##  4 Belgium         4 ARIMA        Test  182.   2.41 0.512  2.38 220.  0.918
     ##  5 Belgium         5 PROPHET      Test  130.   1.71 0.367  1.71 164.  0.932
-    ##  6 Denmark         1 XGBOOST      Test   71.8  2.23 0.356  2.28  96.1 0.944
+    ##  6 Denmark         1 XGBOOST      Test   71.6  2.23 0.355  2.27  95.9 0.944
     ##  7 Denmark         2 TEMPORAL HI~ Test   60.8  1.96 0.302  1.99  77.5 0.970
     ##  8 Denmark         3 ETSMADA      Test   63.0  2.02 0.313  2.06  79.5 0.970
     ##  9 Denmark         4 ARIMA        Test   88.0  2.75 0.436  2.81 108.  0.964
@@ -632,7 +632,7 @@ calculation.<br/> In addition to that, we can also learn more about our
 models and also reveal some weaknesses of a single error metric (however
 good it is, like rmse) which can lead to further improvement or change
 of demand forecasting method.<br/> As we’ll see shortly, it may require
-building customized metrics (luckily, parsley library provides all
+building customized metrics (luckily, yardstick library provides all
 necessary tools to do that).
 
 We’ll use ggplot to explore forecast errors. Object nested_best_tbl
@@ -689,7 +689,9 @@ vis_table %>%
 
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-27-1.png)<!-- -->
 
-It makes a difference, doesn’t it? <br/>
+It makes a difference, doesn’t it? Coloured line represent best model
+based on rmse metric, lightgrey lines mark lower and upper boundaries of
+confidence interval (95%). <br/>
 
 **There are 2 interesting observations from above plots.**<br/>
 **Firstly, best results (minimizing RMSE) are achieved through different
@@ -795,9 +797,180 @@ with BIAS.<br/>
 
 Selection of model reducing BIAS is not possible in modeltime library
 simply because we’re restricted by available metrics.<br/> We can
-however create custom metrics with a help of parsley library which
+however create custom metrics with a help of yardstick library which
 provides a standard template for this. To present this functionality,
 we’ll build a few simple BIAS-oriented metrics and some other demand
 forecasting accuracy-oriented metrics.
+
+We’ll create 4 metrics following same steps:<br/>
+
+1.  tracking signal - arithmetic sum of errors divided by mean absolute
+    deviation (error); this is approach described in APICS CPIM.
+
+``` r
+# first step is to create vector version of function
+
+track_sig_v <- function(truth, estimate, na_rm = TRUE, ...) {
+  
+  t_sig_impl <- function(truth, estimate) {
+    sum(truth - estimate)/mean(abs(truth - estimate))
+  }
+  metric_vec_template(
+    metric_impl = t_sig_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+# next step is data frame implementation of vector version function  
+
+
+track_sig <- function(data, ...) {
+  UseMethod("track_sig")
+}
+
+track_sig <- new_numeric_metric(track_sig, direction = "zero")
+
+track_sig.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "track_sig",
+    metric_fn = track_sig_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+2.  BIAS numeric - if Actual - Prediction \< 0 then -1 (negative BIAS),
+    if = 0 then 0 (no BIAS) else 1 (positive BIAS)
+
+``` r
+bias_n_v <- function(truth, estimate, na_rm = TRUE, ...) {
+  
+  bias_n_v_impl <- function(truth, estimate) {
+    
+    m <- truth - estimate
+    m[m < 0] <- -1
+    m[m > 0] <- 1
+    return(sum(m))
+  }
+  metric_vec_template(
+    metric_impl = bias_n_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+bias_n <- function(data, ...) {
+  UseMethod("bias_n")
+}
+
+bias_n <- new_numeric_metric(bias_n, direction = "zero")
+
+bias_n.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "bias_n",
+    metric_fn = bias_n_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+3.  BIAS (cumulative sum of errors)
+
+``` r
+bias_cumsum_v <- function(truth, estimate, na_rm = TRUE, ...) {
+  
+  bias_cumsum_v_impl <- function(truth, estimate) {
+    
+    m <- truth - estimate
+    n <- cumsum(m)
+    return(n[length(n)])
+  }
+  metric_vec_template(
+    metric_impl = bias_cumsum_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+bias_cumsum <- function(data, ...) {
+  UseMethod("bias_cumsum")
+}
+
+bias_cumsum <- new_numeric_metric(bias_cumsum, direction = "zero")
+
+bias_cumsum.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "bias_cumsum",
+    metric_fn = bias_cumsum_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+4.  Accuracy - percentage of errors falling within +- 5% threshold<br/>
+
+``` r
+acc_95_v <- function(truth, estimate, na_rm = TRUE, ...) {
+
+  acc_95_v_impl <- function(truth, estimate) {
+
+    m <- truth/estimate
+    m[m < 0.95 | m > 1.05] <- 0
+    m[m >= 0.95 & m <= 1.05] <- 1
+    return(sum(m)/length(m))
+  }
+  metric_vec_template(
+    metric_impl = acc_95_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+acc_95 <- function(data, ...) {
+  UseMethod("acc_95")
+}
+
+acc_95 <- new_numeric_metric(acc_95, direction = "maximize")
+
+acc_95.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "acc_95",
+    metric_fn = acc_95_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+Such created custom metrics can be passed to metric_set argument for
+best model selection criteria.
 
 TO BE CONTINUED.
