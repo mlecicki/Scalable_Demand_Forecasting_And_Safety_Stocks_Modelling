@@ -565,12 +565,12 @@ nested_modeltime_tbl %>%
     ## # A tibble: 60 x 10
     ##    country .model_id .model_desc  .type   mae  mape  mase smape  rmse   rsq
     ##    <chr>       <int> <chr>        <chr> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
-    ##  1 Belgium         1 XGBOOST      Test  210.   2.65 0.591  2.70 289.  0.844
+    ##  1 Belgium         1 XGBOOST      Test  217.   2.73 0.610  2.79 294.  0.841
     ##  2 Belgium         2 TEMPORAL HI~ Test  166.   2.19 0.466  2.17 194.  0.933
     ##  3 Belgium         3 ETSMAA       Test  145.   1.91 0.409  1.90 181.  0.928
     ##  4 Belgium         4 ARIMA        Test  182.   2.41 0.512  2.38 220.  0.918
     ##  5 Belgium         5 PROPHET      Test  130.   1.71 0.367  1.71 164.  0.932
-    ##  6 Denmark         1 XGBOOST      Test   71.6  2.23 0.355  2.27  95.9 0.944
+    ##  6 Denmark         1 XGBOOST      Test   71.5  2.23 0.355  2.27  96.0 0.944
     ##  7 Denmark         2 TEMPORAL HI~ Test   60.8  1.96 0.302  1.99  77.5 0.970
     ##  8 Denmark         3 ETSMADA      Test   63.0  2.02 0.313  2.06  79.5 0.970
     ##  9 Denmark         4 ARIMA        Test   88.0  2.75 0.436  2.81 108.  0.964
@@ -646,6 +646,13 @@ nested_best_tbl_extract <- nested_best_tbl %>%
 With a little bit of data transformation we can get all we need to plot
 errors and evaluate best models from that perspective. <br/>
 
+At this point it’s important to highlight that error will be calculated
+as prediction - actual (NOT actual - prediction). We’ll do it as we’ll
+be investigating the presence of BIAS and it will be more intuitive
+as:<br/> - consistent presence of positive errors will suggest presence
+of positive BIAS,<br/> - consistent presence of negative errors will
+suggest present of negative BIAS.
+
 ``` r
 actual <- nested_best_tbl_extract %>%
   filter(.key == 'actual')
@@ -663,8 +670,8 @@ vis_table <- actual %>%
          actual = .value.x,
          prediction = .value.y) %>%
   group_by(country) %>%
-  mutate(error = actual - prediction,
-         BIAS_cumsum = cumsum(actual - prediction)) %>%
+  mutate(error = prediction - actual,
+         BIAS_cumsum = cumsum(prediction - actual)) %>%
   select(!c(.model_id.x, .model_desc.x, .conf_lo.x, .conf_hi.x)
          )
 ```
@@ -689,9 +696,9 @@ vis_table %>%
 
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-27-1.png)<!-- -->
 
-It makes a difference, doesn’t it? Coloured line represent best model
-based on rmse metric, lightgrey lines mark lower and upper boundaries of
-confidence interval (95%). <br/>
+It makes a difference, doesn’t it? <br/> Colored line represent best
+model based on rmse metric, lightgrey lines mark lower and upper
+boundaries of confidence interval (95%). <br/>
 
 **There are 2 interesting observations from above plots.**<br/>
 **Firstly, best results (minimizing RMSE) are achieved through different
@@ -724,10 +731,12 @@ vis_table %>%
 
 Indeed, distribution of errors in some countries is clearly skewed
 either to left or right. Extreme example of this is Netherlands and
-Denmark, which suggests presence of positive BIAS.<br/> This can be
-easier to notice using geom_density instead of geom_histogram since we
-only have 24 discrete observations. As a reminder, area under density
-curve is 1 (which is 100% of all probabilities for value on x-axis).
+Denmark, which suggests presence of negative BIAS (distribution of error
+calculated as prediction minus actual is mostly lower than 0 which means
+underforecasting).<br/> This can be easier to notice using geom_density
+instead of geom_histogram since we only have 24 discrete observations.
+As a reminder, area under density curve is 1 (which is 100% of all
+probabilities for value on x-axis).
 
 ``` r
 vis_table %>%
@@ -749,8 +758,8 @@ vis_table %>%
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-29-1.png)<!-- -->
 
 Let’s confirm our findings plotting BIAS (cumulative sum of error
-calculated as actual - forecast) to check for any patterns of CONSISTENT
-deviation from actual demand from test set.
+calculated as prediction - actual) to check for any patterns of
+CONSISTENT deviation from actual demand from test set.
 
 ``` r
 vis_table %>%
@@ -790,22 +799,24 @@ vis_table %>%
 
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-31-1.png)<!-- -->
 
-Above plot confirms positive BIAS in Netherlands and Denmark and
-negative BIAS in UK over majority of test horizon. Errors in other
-market oscillate around 0, which indicates that there’s no major problem
-with BIAS.<br/>
+Above plot confirms negative BIAS in Netherlands and Denmark and
+presence of positive BIAS in UK over majority of test horizon. <br/>
+Errors in other market oscillate around 0, which indicates that there’s
+no major problem with BIAS.<br/>
 
-Selection of model reducing BIAS is not possible in modeltime library
-simply because we’re restricted by available metrics.<br/> We can
-however create custom metrics with a help of yardstick library which
+Evaluation of models from BIAS perspective is not possible in modeltime
+library simply because we’re restricted by available metrics.<br/> We
+can however create custom metrics with a help of yardstick library which
 provides a standard template for this. To present this functionality,
-we’ll build a few simple BIAS-oriented metrics and some other demand
-forecasting accuracy-oriented metrics.
+we’ll build a few simple BIAS-oriented metrics and accuracy-oriented
+metrics to invest forecast precision.
 
-We’ll create 4 metrics following same steps:<br/>
+We’ll create 5 metrics following same steps (described through
+comments):<br/>
 
 1.  tracking signal - arithmetic sum of errors divided by mean absolute
-    deviation (error); this is approach described in APICS CPIM.
+    deviation (error); this is approach described in APICS CPIM;
+    acceptable value depends on decision-makers.
 
 ``` r
 # first step is to create vector version of function
@@ -813,8 +824,9 @@ We’ll create 4 metrics following same steps:<br/>
 track_sig_v <- function(truth, estimate, na_rm = TRUE, ...) {
   
   t_sig_impl <- function(truth, estimate) {
-    sum(truth - estimate)/mean(abs(truth - estimate))
+    sum(estimate - truth)/mean(abs(estimate - truth))
   }
+  # next step is pass implementation of the function to metric_vec_template
   metric_vec_template(
     metric_impl = t_sig_impl,
     truth = truth,
@@ -825,13 +837,14 @@ track_sig_v <- function(truth, estimate, na_rm = TRUE, ...) {
   )
 }
 
-# next step is data frame implementation of vector version function  
+# final step is data frame implementation of vector version function  
 
 
 track_sig <- function(data, ...) {
   UseMethod("track_sig")
 }
-
+# direction can be set o 'zero', 'minimize' or 'maximize' which depends on nature
+# of the metric
 track_sig <- new_numeric_metric(track_sig, direction = "zero")
 
 track_sig.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
@@ -847,15 +860,16 @@ track_sig.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-2.  BIAS numeric - if Actual - Prediction \< 0 then -1 (negative BIAS),
-    if = 0 then 0 (no BIAS) else 1 (positive BIAS)
+2.  BIAS_n - arithmetic sum of numeric representation of BIAS (-1 if
+    negative BIAS, 0 if no BIAS, 1 if positive BIAS); value 0 suggests
+    balanced model.
 
 ``` r
 bias_n_v <- function(truth, estimate, na_rm = TRUE, ...) {
   
   bias_n_v_impl <- function(truth, estimate) {
     
-    m <- truth - estimate
+    m <- estimate - truth
     m[m < 0] <- -1
     m[m > 0] <- 1
     return(sum(m))
@@ -889,19 +903,19 @@ bias_n.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-3.  BIAS (cumulative sum of errors)
+3.  BIAS_c - cumulative sum of errors (the closer to 0 the highest
+    alignment to total actual demand over test horizon).
 
 ``` r
-bias_cumsum_v <- function(truth, estimate, na_rm = TRUE, ...) {
+bias_c_v <- function(truth, estimate, na_rm = TRUE, ...) {
   
-  bias_cumsum_v_impl <- function(truth, estimate) {
+  bias_c_v_impl <- function(truth, estimate) {
     
-    m <- truth - estimate
-    n <- cumsum(m)
-    return(n[length(n)])
+    m <- cumsum(estimate - truth)
+    return(m[length(m)])
   }
   metric_vec_template(
-    metric_impl = bias_cumsum_v_impl,
+    metric_impl = bias_c_v_impl,
     truth = truth,
     estimate = estimate,
     na_rm = na_rm,
@@ -910,16 +924,16 @@ bias_cumsum_v <- function(truth, estimate, na_rm = TRUE, ...) {
   )
 }
 
-bias_cumsum <- function(data, ...) {
-  UseMethod("bias_cumsum")
+bias_c <- function(data, ...) {
+  UseMethod("bias_c")
 }
 
-bias_cumsum <- new_numeric_metric(bias_cumsum, direction = "zero")
+bias_c <- new_numeric_metric(bias_c, direction = "zero")
 
-bias_cumsum.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+bias_c.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
   metric_summarizer(
-    metric_nm = "bias_cumsum",
-    metric_fn = bias_cumsum_v,
+    metric_nm = "bias_c",
+    metric_fn = bias_c_v,
     data = data,
     truth = !! enquo(truth),
     estimate = !! enquo(estimate),
@@ -929,14 +943,52 @@ bias_cumsum.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-4.  Accuracy - percentage of errors falling within +- 5% threshold<br/>
+4.  BIAS_m (arithmetic mean of errors)
+
+``` r
+bias_m_v <- function(truth, estimate, na_rm = TRUE, ...) {
+  
+  bias_m_v_impl <- function(truth, estimate) {
+    
+    mean(estimate - truth)
+  }
+  metric_vec_template(
+    metric_impl = bias_m_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+bias_m <- function(data, ...) {
+  UseMethod("bias_m")
+}
+
+bias_m <- new_numeric_metric(bias_m, direction = "zero")
+
+bias_m.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "bias_m",
+    metric_fn = bias_m_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+5.  Accuracy - percentage of errors falling within +- 5% threshold<br/>
 
 ``` r
 acc_95_v <- function(truth, estimate, na_rm = TRUE, ...) {
 
   acc_95_v_impl <- function(truth, estimate) {
 
-    m <- truth/estimate
+    m <- estimate/truth
     m[m < 0.95 | m > 1.05] <- 0
     m[m >= 0.95 & m <= 1.05] <- 1
     return(sum(m)/length(m))
@@ -970,7 +1022,146 @@ acc_95.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-Such created custom metrics can be passed to metric_set argument for
-best model selection criteria.
+Such created custom metrics can be passed to an object…
+
+``` r
+cust_metrics <- metric_set(rmse, track_sig, bias_n, bias_c, bias_m, acc_95)
+```
+
+…and further to metric_set argument inside modeltime_nested_fit
+function.<br/> We’ll re-do modelling only for countries with BIAS.
+
+``` r
+check_bias_nested_tbl <- nested_data_tbl %>%
+  dplyr::filter(country %in% c('Netherlands', 'Denmark', 'UK')) %>%
+  modeltime_nested_fit(
+    model_list = list(
+      wflw_xgb,
+      wflw_thief,
+      wfl_exp_s,
+      wfl_arima,
+      wfl_prophet
+    ),
+    metric_set = cust_metrics, # custom metrics
+    control = control_nested_fit(
+      verbose = TRUE,
+      allow_par = FALSE
+    )
+  )
+```
+
+Let’s again visualized models for the three countries. Again, we’ll do
+that only for test horizon to improve readability.<br/> We’ll create
+separate plot for each country and inspect models visually
+cross-checking with results of our custom metrics (and rmse) in order to
+pick best model.
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_forecast() %>%
+  filter(country == "Netherlands") %>%
+  filter(.index > as.Date('2002-06-01')) %>%
+  ggplot() +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  theme_minimal() +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_blank()
+        ) +
+  ggtitle('Netherlands: Models fit over test set horizon.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-39-1.png)<!-- -->
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_accuracy() %>%
+  filter(country == 'Netherlands') %>%
+  select(!.model_id)
+```
+
+    ## # A tibble: 5 x 9
+    ##   country  .model_desc    .type  rmse track_sig bias_n bias_c bias_m acc_95
+    ##   <chr>    <chr>          <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
+    ## 1 Netherl~ XGBOOST        Test   199.     -23.8    -22 -3304.  -138.  1    
+    ## 2 Netherl~ TEMPORAL HIER~ Test   228.      18.9     16  3730.   155.  1    
+    ## 3 Netherl~ ETSMAA         Test   239.      18.2     16  3757.   157.  1    
+    ## 4 Netherl~ ARIMA          Test   237.      19.7     16  4000.   167.  1    
+    ## 5 Netherl~ PROPHET        Test   314.      21.7     18  5849.   244.  0.833
+
+Best model for Netherlands: TBC
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_forecast() %>%
+  filter(country == "Denmark") %>%
+  filter(.index > as.Date('2002-06-01')) %>%
+  ggplot() +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  theme_minimal() +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_blank()
+        ) +
+  ggtitle('Denmark: Models fit over test set horizon.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-41-1.png)<!-- -->
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_accuracy() %>%
+  filter(country == 'Denmark') %>%
+  select(!.model_id)
+```
+
+    ## # A tibble: 5 x 9
+    ##   country .model_desc     .type  rmse track_sig bias_n bias_c bias_m acc_95
+    ##   <chr>   <chr>           <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
+    ## 1 Denmark XGBOOST         Test   96.6     -18.6     -6 -1336.  -55.7  0.875
+    ## 2 Denmark TEMPORAL HIERA~ Test   77.5     -20.9    -18 -1271.  -53.0  0.958
+    ## 3 Denmark ETSMADA         Test   79.5     -21.0    -18 -1327.  -55.3  0.958
+    ## 4 Denmark ARIMA           Test  108.      -23.4    -20 -2057.  -85.7  0.875
+    ## 5 Denmark PROPHET         Test  104.      -23.4    -20 -1987.  -82.8  0.958
+
+Best model for Denmark: TBC
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_forecast() %>%
+  filter(country == "UK") %>%
+  filter(.index > as.Date('2002-06-01')) %>%
+  ggplot() +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  theme_minimal() +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_blank()
+        ) +
+  ggtitle('UK: Models fit over test set horizon.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-43-1.png)<!-- -->
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_accuracy() %>%
+  filter(country == 'UK') %>%
+  select(!.model_id)
+```
+
+    ## # A tibble: 5 x 9
+    ##   country .model_desc    .type  rmse track_sig bias_n  bias_c bias_m acc_95
+    ##   <chr>   <chr>          <chr> <dbl>     <dbl>  <dbl>   <dbl>  <dbl>  <dbl>
+    ## 1 UK      XGBOOST        Test  2021.    -16.0      -6 -22216.  -926.  0.792
+    ## 2 UK      TEMPORAL HIER~ Test  1419.     -5.90     -2  -6227.  -259.  0.708
+    ## 3 UK      ETSMAA         Test  1387.     -4.05      0  -4203.  -175.  0.75 
+    ## 4 UK      ARIMA          Test  1486.      5.16      8   5964.   249.  0.75 
+    ## 5 UK      PROPHET        Test  1353.      7.63     10   8365.   349.  0.792
+
+Best model for UK: TBC
 
 TO BE CONTINUED.
