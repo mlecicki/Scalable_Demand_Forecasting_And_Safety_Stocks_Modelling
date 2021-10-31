@@ -545,7 +545,7 @@ vis_table %>%
   ggtitle('Best models: monthly errors over test set horizon.')
 ```
 
-Above plot confirms negative BIAS in Netherlands and Denmark and presence of positive BIAS in UK over majority of test horizon. <br/>
+Above plot confirms negative BIAS in Netherlands and Denmark and presence of positive BIAS in UK and presence of negative BIAS in Greece over majority of test horizon. <br/>
 Errors in other market oscillate around 0, which indicates that there's no major problem with BIAS.<br/>
 
 Evaluation of models from BIAS perspective is not possible in modeltime library simply because we're restricted by available metrics.<br/>
@@ -554,7 +554,7 @@ We can however create custom metrics with a help of yardstick library which prov
 
 We'll create 5 metrics following same steps (described through comments):<br/>
 
-1. tracking signal - arithmetic sum of errors divided by mean absolute deviation (error); this is approach described in APICS CPIM; acceptable value depends on decision-makers.
+1. tracking signal - sum of errors divided by mean absolute deviation (error); this is approach described in APICS CPIM; acceptable value depends on decision-makers.
 
 ```{r}
 
@@ -608,6 +608,7 @@ bias_n_v <- function(truth, estimate, na_rm = TRUE, ...) {
     
     m <- estimate - truth
     m[m < 0] <- -1
+    m[m == 0] <- 0
     m[m > 0] <- 1
     return(sum(m))
   }
@@ -767,11 +768,11 @@ cust_metrics <- metric_set(rmse, track_sig, bias_n, bias_c, bias_m, acc_95)
 ```
 
 ...and further to metric_set argument inside modeltime_nested_fit function.<br/>
-We'll re-do modelling only for countries with BIAS.
+We'll re-do modelling only for countries with presence of BIAS.
 
 ```{r}
 check_bias_nested_tbl <- nested_data_tbl %>%
-  dplyr::filter(country %in% c('Netherlands', 'Denmark', 'UK')) %>%
+  dplyr::filter(country %in% c('Netherlands', 'Greece', 'Denmark', 'UK')) %>%
   modeltime_nested_fit(
     model_list = list(
       wflw_xgb,
@@ -787,14 +788,14 @@ check_bias_nested_tbl <- nested_data_tbl %>%
     )
   )
 ```
-Let's again visualized models for the three countries. Again, we'll do that only for test horizon to improve readability.<br/>
+Let's once more time visualize models for the four countries. Again, we'll do that only for test horizon to maximize readability of our plots.<br/>
 We'll create separate plot for each country and inspect models visually cross-checking with results of our custom metrics (and rmse) in order to pick best model.
 
 ```{r}
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "Netherlands") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -805,6 +806,7 @@ check_bias_nested_tbl %>%
         ) +
   ggtitle('Netherlands: Models fit over test set horizon.')
 ```
+Netherlands: custom error metrics' results.
 
 ```{r}
 check_bias_nested_tbl %>%
@@ -812,14 +814,37 @@ check_bias_nested_tbl %>%
   filter(country == 'Netherlands') %>%
   select(!.model_id)
 ```
+```{r}
+check_bias_nested_tbl %>%
+  extract_nested_test_forecast() %>%
+  filter(country == "Greece") %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
+  ggplot() +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  theme_minimal() +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_blank()
+        ) +
+  ggtitle('Greece: Models fit over test set horizon.')
+```
 
-Best model for Netherlands: TBC
+Greece: custom error metrics' results.
+
+```{r}
+check_bias_nested_tbl %>%
+  extract_nested_test_accuracy() %>%
+  filter(country == 'Greece') %>%
+  select(!.model_id)
+```
+
 
 ```{r}
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "Denmark") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -831,6 +856,7 @@ check_bias_nested_tbl %>%
   ggtitle('Denmark: Models fit over test set horizon.')
 
 ```
+Denmark: Custom error metrics' results.
 
 ```{r}
 check_bias_nested_tbl %>%
@@ -839,13 +865,11 @@ check_bias_nested_tbl %>%
   select(!.model_id)
 ```
 
-Best model for Denmark: TBC
-
 ```{r}
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "UK") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -857,6 +881,7 @@ check_bias_nested_tbl %>%
   ggtitle('UK: Models fit over test set horizon.')
 
 ```
+UK: custom error metrics' results.
 
 ```{r}
 check_bias_nested_tbl %>%
@@ -864,8 +889,48 @@ check_bias_nested_tbl %>%
   filter(country == 'UK') %>%
   select(!.model_id)
 ```
-Best model for UK: TBC
+Additional metrics shed more light on the problem of BIAS and also on precision of our models. Results of metrics indicate that other 'best' models could be chosen if rmse was not a primary error criterion.<br/>
+
+As for our analysis, let's stick to rmse taking into account high precision of models. The problem of BIAS was mainly meant to show flexibility in terms of development of custom metrics. 
+
+
+##### Refitting models and forecasting future months.
+
+Best models can now be refit on full dataset (train + test) using modeltime_nested_refit function from modeltime library.
+
+```{r}
+nested_best_refit_tbl <- nested_best_tbl %>%
+  modeltime_nested_refit(
+    control = control_refit(
+      verbose = TRUE,
+      allow_par = TRUE
+    )
+  )
+```
+Refit models can be now used to forecast future months (outside of test set horizon) set at the beginning of analysis (12 months) using function extract_nested_future_forecast.<br/>
+
+Forecast naturally can also be visualized. We'll used plot_modeltime_forecast from modeltime package, alternatively for more elegant results ggplot could be used. This would require small data manipulation first so we'll stick to tools (plot) provided by modeltime.
+
+```{r}
+nested_best_refit_tbl %>%
+  extract_nested_future_forecast() %>%
+  group_by(country) %>%
+  plot_modeltime_forecast(.facet_ncol = 4,
+                          .conf_interval_show = TRUE,
+                          .legend_show = TRUE,
+                          .interactive = FALSE,
+                          .title = 'Forecast for future months per country.'
+                          )
+```
+
+Quick visual inspection tells that forecast for most countries looks fine. Exception is Greece where it doesn't follow upward trend. This can suggest that Exponential Smoothing method should be changed for other model - one with similar precision and less evident negative BIAS (XGBoost) maybe?
+
+
+##### Safety stock modelling using expected forecast errors
+<br/>
+
+To model safety stock invaluable information is distribution of expected errors from test set horizon per country.<br/>
+Let's visualize them one more time.
 
 
 TO BE CONTINUED.
-

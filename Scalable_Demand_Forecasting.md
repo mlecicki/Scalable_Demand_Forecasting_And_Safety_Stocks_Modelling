@@ -565,12 +565,12 @@ nested_modeltime_tbl %>%
     ## # A tibble: 60 x 10
     ##    country .model_id .model_desc  .type   mae  mape  mase smape  rmse   rsq
     ##    <chr>       <int> <chr>        <chr> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
-    ##  1 Belgium         1 XGBOOST      Test  217.   2.73 0.610  2.79 294.  0.841
+    ##  1 Belgium         1 XGBOOST      Test  213.   2.68 0.599  2.73 293.  0.840
     ##  2 Belgium         2 TEMPORAL HI~ Test  166.   2.19 0.466  2.17 194.  0.933
     ##  3 Belgium         3 ETSMAA       Test  145.   1.91 0.409  1.90 181.  0.928
     ##  4 Belgium         4 ARIMA        Test  182.   2.41 0.512  2.38 220.  0.918
     ##  5 Belgium         5 PROPHET      Test  130.   1.71 0.367  1.71 164.  0.932
-    ##  6 Denmark         1 XGBOOST      Test   71.5  2.23 0.355  2.27  96.0 0.944
+    ##  6 Denmark         1 XGBOOST      Test   71.4  2.22 0.354  2.26  95.8 0.944
     ##  7 Denmark         2 TEMPORAL HI~ Test   60.8  1.96 0.302  1.99  77.5 0.970
     ##  8 Denmark         3 ETSMADA      Test   63.0  2.02 0.313  2.06  79.5 0.970
     ##  9 Denmark         4 ARIMA        Test   88.0  2.75 0.436  2.81 108.  0.964
@@ -800,9 +800,9 @@ vis_table %>%
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-31-1.png)<!-- -->
 
 Above plot confirms negative BIAS in Netherlands and Denmark and
-presence of positive BIAS in UK over majority of test horizon. <br/>
-Errors in other market oscillate around 0, which indicates that there’s
-no major problem with BIAS.<br/>
+presence of positive BIAS in UK and presence of negative BIAS in Greece
+over majority of test horizon. <br/> Errors in other market oscillate
+around 0, which indicates that there’s no major problem with BIAS.<br/>
 
 Evaluation of models from BIAS perspective is not possible in modeltime
 library simply because we’re restricted by available metrics.<br/> We
@@ -814,9 +814,9 @@ metrics to invest forecast precision.
 We’ll create 5 metrics following same steps (described through
 comments):<br/>
 
-1.  tracking signal - arithmetic sum of errors divided by mean absolute
-    deviation (error); this is approach described in APICS CPIM;
-    acceptable value depends on decision-makers.
+1.  tracking signal - sum of errors divided by mean absolute deviation
+    (error); this is approach described in APICS CPIM; acceptable value
+    depends on decision-makers.
 
 ``` r
 # first step is to create vector version of function
@@ -871,6 +871,7 @@ bias_n_v <- function(truth, estimate, na_rm = TRUE, ...) {
     
     m <- estimate - truth
     m[m < 0] <- -1
+    m[m == 0] <- 0
     m[m > 0] <- 1
     return(sum(m))
   }
@@ -1029,11 +1030,12 @@ cust_metrics <- metric_set(rmse, track_sig, bias_n, bias_c, bias_m, acc_95)
 ```
 
 …and further to metric_set argument inside modeltime_nested_fit
-function.<br/> We’ll re-do modelling only for countries with BIAS.
+function.<br/> We’ll re-do modelling only for countries with presence of
+BIAS.
 
 ``` r
 check_bias_nested_tbl <- nested_data_tbl %>%
-  dplyr::filter(country %in% c('Netherlands', 'Denmark', 'UK')) %>%
+  dplyr::filter(country %in% c('Netherlands', 'Greece', 'Denmark', 'UK')) %>%
   modeltime_nested_fit(
     model_list = list(
       wflw_xgb,
@@ -1050,17 +1052,17 @@ check_bias_nested_tbl <- nested_data_tbl %>%
   )
 ```
 
-Let’s again visualized models for the three countries. Again, we’ll do
-that only for test horizon to improve readability.<br/> We’ll create
-separate plot for each country and inspect models visually
-cross-checking with results of our custom metrics (and rmse) in order to
-pick best model.
+Let’s once more time visualize models for the four countries. Again,
+we’ll do that only for test horizon to maximize readability of our
+plots.<br/> We’ll create separate plot for each country and inspect
+models visually cross-checking with results of our custom metrics (and
+rmse) in order to pick best model.
 
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "Netherlands") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -1073,6 +1075,7 @@ check_bias_nested_tbl %>%
 ```
 
 ![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-39-1.png)<!-- -->
+Netherlands: custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1084,19 +1087,53 @@ check_bias_nested_tbl %>%
     ## # A tibble: 5 x 9
     ##   country  .model_desc    .type  rmse track_sig bias_n bias_c bias_m acc_95
     ##   <chr>    <chr>          <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
-    ## 1 Netherl~ XGBOOST        Test   199.     -23.8    -22 -3304.  -138.  1    
+    ## 1 Netherl~ XGBOOST        Test   202.     -24.0    -22 -3421.  -143.  1    
     ## 2 Netherl~ TEMPORAL HIER~ Test   228.      18.9     16  3730.   155.  1    
     ## 3 Netherl~ ETSMAA         Test   239.      18.2     16  3757.   157.  1    
     ## 4 Netherl~ ARIMA          Test   237.      19.7     16  4000.   167.  1    
     ## 5 Netherl~ PROPHET        Test   314.      21.7     18  5849.   244.  0.833
 
-Best model for Netherlands: TBC
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_forecast() %>%
+  filter(country == "Greece") %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
+  ggplot() +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  theme_minimal() +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_blank()
+        ) +
+  ggtitle('Greece: Models fit over test set horizon.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-41-1.png)<!-- -->
+
+Greece: custom error metrics’ results.
+
+``` r
+check_bias_nested_tbl %>%
+  extract_nested_test_accuracy() %>%
+  filter(country == 'Greece') %>%
+  select(!.model_id)
+```
+
+    ## # A tibble: 5 x 9
+    ##   country .model_desc     .type  rmse track_sig bias_n bias_c bias_m acc_95
+    ##   <chr>   <chr>           <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
+    ## 1 Greece  XGBOOST         Test   227.     -12.7     -2 -2114.  -88.1  0.75 
+    ## 2 Greece  TEMPORAL HIERA~ Test   268.      22.3     20  5072.  211.   0.542
+    ## 3 Greece  ETSMADM         Test   188.     -15.4     -8 -2105.  -87.7  0.792
+    ## 4 Greece  ARIMA           Test   276.      20.8     18  4887.  204.   0.583
+    ## 5 Greece  PROPHET         Test   310.      15.2     14  3911.  163.   0.542
 
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "Denmark") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -1108,7 +1145,8 @@ check_bias_nested_tbl %>%
   ggtitle('Denmark: Models fit over test set horizon.')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-41-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-43-1.png)<!-- -->
+Denmark: Custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1120,19 +1158,17 @@ check_bias_nested_tbl %>%
     ## # A tibble: 5 x 9
     ##   country .model_desc     .type  rmse track_sig bias_n bias_c bias_m acc_95
     ##   <chr>   <chr>           <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
-    ## 1 Denmark XGBOOST         Test   96.6     -18.6     -6 -1336.  -55.7  0.875
+    ## 1 Denmark XGBOOST         Test   96.0     -18.0     -6 -1286.  -53.6  0.875
     ## 2 Denmark TEMPORAL HIERA~ Test   77.5     -20.9    -18 -1271.  -53.0  0.958
     ## 3 Denmark ETSMADA         Test   79.5     -21.0    -18 -1327.  -55.3  0.958
     ## 4 Denmark ARIMA           Test  108.      -23.4    -20 -2057.  -85.7  0.875
     ## 5 Denmark PROPHET         Test  104.      -23.4    -20 -1987.  -82.8  0.958
 
-Best model for Denmark: TBC
-
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_forecast() %>%
   filter(country == "UK") %>%
-  filter(.index > as.Date('2002-06-01')) %>%
+  filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
   geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
   theme_minimal() +
@@ -1144,7 +1180,8 @@ check_bias_nested_tbl %>%
   ggtitle('UK: Models fit over test set horizon.')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-43-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-45-1.png)<!-- -->
+UK: custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1156,12 +1193,70 @@ check_bias_nested_tbl %>%
     ## # A tibble: 5 x 9
     ##   country .model_desc    .type  rmse track_sig bias_n  bias_c bias_m acc_95
     ##   <chr>   <chr>          <chr> <dbl>     <dbl>  <dbl>   <dbl>  <dbl>  <dbl>
-    ## 1 UK      XGBOOST        Test  2021.    -16.0      -6 -22216.  -926.  0.792
+    ## 1 UK      XGBOOST        Test  2021.    -16.3      -6 -22536.  -939.  0.792
     ## 2 UK      TEMPORAL HIER~ Test  1419.     -5.90     -2  -6227.  -259.  0.708
     ## 3 UK      ETSMAA         Test  1387.     -4.05      0  -4203.  -175.  0.75 
     ## 4 UK      ARIMA          Test  1486.      5.16      8   5964.   249.  0.75 
     ## 5 UK      PROPHET        Test  1353.      7.63     10   8365.   349.  0.792
 
-Best model for UK: TBC
+Additional metrics shed more light on the problem of BIAS and also on
+precision of our models. Results of metrics indicate that other ‘best’
+models could be chosen if rmse was not a primary error criterion.<br/>
+
+As for our analysis, let’s stick to rmse taking into account high
+precision of models. The problem of BIAS was mainly meant to show
+flexibility in terms of development of custom metrics.
+
+##### Refitting models and forecasting future months.
+
+Best models can now be refit on full dataset (train + test) using
+modeltime_nested_refit function from modeltime library.
+
+``` r
+nested_best_refit_tbl <- nested_best_tbl %>%
+  modeltime_nested_refit(
+    control = control_refit(
+      verbose = TRUE,
+      allow_par = TRUE
+    )
+  )
+```
+
+Refit models can be now used to forecast future months (outside of test
+set horizon) set at the beginning of analysis (12 months) using function
+extract_nested_future_forecast.<br/>
+
+Forecast naturally can also be visualized. We’ll used
+plot_modeltime_forecast from modeltime package, alternatively for more
+elegant results ggplot could be used. This would require small data
+manipulation first so we’ll stick to tools (plot) provided by modeltime.
+
+``` r
+nested_best_refit_tbl %>%
+  extract_nested_future_forecast() %>%
+  group_by(country) %>%
+  plot_modeltime_forecast(.facet_ncol = 4,
+                          .conf_interval_show = TRUE,
+                          .legend_show = TRUE,
+                          .interactive = FALSE,
+                          .title = 'Forecast for future months per country.'
+                          )
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-48-1.png)<!-- -->
+
+Quick visual inspection tells that forecast for most countries looks
+fine. Exception is Greece where it doesn’t follow upward trend. This can
+suggest that Exponential Smoothing method should be changed for other
+model - one with similar precision and less evident negative BIAS
+(XGBoost) maybe?
+
+##### Safety stock modelling using expected forecast errors
+
+<br/>
+
+To model safety stock invaluable information is distribution of expected
+errors from test set horizon per country.<br/> Let’s visualize them one
+more time.
 
 TO BE CONTINUED.
