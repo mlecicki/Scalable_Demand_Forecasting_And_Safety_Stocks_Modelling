@@ -38,6 +38,7 @@ library('lubridate')
 library('workflowsets')
 library('tune')
 library('patchwork')
+library('wesanderson')
 ```
 
 Key libraries used in this project are modeltime and tidymodels, both based on 'tidyverse' principles.
@@ -309,6 +310,7 @@ What it means? It means that we'll in fact build five different models per count
 <br/>
 Before that, good practice is to fit them on a single dataset (country) and inspect for any potential errors (usually driven by data quality, namely completeness). Let's do it!<br/>
 
+One of the argument of this function, important for our analysis is conf_interval which can be interpret as range of possible outcomes for a prediction calculated at certain probability. Default value of probability is 0.95, let's change it to 0.99.
 ```{r echo = FALSE}
 try_sample_tbl <- nested_data_tbl %>%
   dplyr::slice(2) %>% #2nd (nested) country
@@ -320,6 +322,7 @@ try_sample_tbl <- nested_data_tbl %>%
       wfl_arima,
       wfl_prophet
     ),
+    conf_interval = 0.99,
     control = control_nested_fit(
       verbose = TRUE, # setting this to TRUE allows detailed progress check, 
                       # whereas value FALSE gives high level progress
@@ -335,7 +338,8 @@ try_sample_tbl %>%
   extract_nested_error_report()
 ```
 
-Our workflows are errors-free so let's fit them on full dataset. Fitting models can take some time. We can shorten it allowing parallel run on PC's cores. To do that (and first to check for number of cores, functions from parallel library can be used - commented out in below code).
+Our workflows are errors-free so let's fit them on full dataset.<br/>
+Fitting models can take some time. We can shorten it allowing parallel run on PC's cores. To do that (and first to check for number of cores, functions from parallel library can be used - commented out in below code).
 Alternatively we can set allow_par argument to TRUE will have similar effect (although recommended is using parallel_start() function with relevant number of cores.
 
 ```{r}
@@ -351,6 +355,7 @@ nested_modeltime_tbl <- nested_data_tbl %>%
       wfl_arima,
       wfl_prophet
     ),
+    conf_interval = 0.99,
     control = control_nested_fit(
       verbose = FALSE,
       allow_par = FALSE
@@ -455,12 +460,16 @@ vis_table %>%
   ggplot(group = country) +
   geom_line(aes(x = .index, y = actual)) +
   geom_line(aes(x = .index, y = prediction, color = .model_desc.y)) +
-  geom_line(aes(x = .index, y = conf_low), color = 'lightgrey') +
-  geom_line(aes(x = .index, y = conf_high), color = 'lightgrey') +
+  geom_line(aes(x = .index, y = conf_low), 
+            color = 'lightgrey') +
+  geom_line(aes(x = .index, y = conf_high), 
+            color = 'lightgrey') +
   theme_minimal() +
   facet_wrap(.~ country, ncol = 3, scales = 'free_y') +
   labs(color = 'model') +
-  theme(legend.position = 'bottom', plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
   ggtitle('Best models fit over test set horizon.')
 ```
 
@@ -553,6 +562,7 @@ We can however create custom metrics with a help of yardstick library which prov
 
 
 We'll create 5 metrics following same steps (described through comments):<br/>
+Four of them will be BIAS-related, one focusing on precision and in addition we'll calculate standard error (se) which could be used for evaluation of different boundaries of confidence interval.
 
 1. tracking signal - sum of errors divided by mean absolute deviation (error); this is approach described in APICS CPIM; acceptable value depends on decision-makers.
 
@@ -761,10 +771,53 @@ acc_95.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-Such created custom metrics can be passed to an object... 
+6. standard error of forecast - used to calculate confidence intervals at given alpha; we'll use it later for safety stock modelling.
+Please note that although 'truth' argument is not used in metric calculation, it still needs to be passed to the function in order to use this framework.
 
 ```{r}
-cust_metrics <- metric_set(rmse, track_sig, bias_n, bias_c, bias_m, acc_95)
+se_v <- function(truth, estimate, na_rm = TRUE, ...) {
+
+  se_v_impl <- function(truth, estimate) {
+
+    m <- sd(estimate)
+    n <- length(estimate)
+    se <- m/sqrt(n)
+    return(se)
+  }
+  metric_vec_template(
+    metric_impl = se_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+se <- function(data, ...) {
+  UseMethod("se")
+}
+
+se <- new_numeric_metric(se, direction = "minimize")
+
+se.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "se",
+    metric_fn = se_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+
+```
+
+Such created custom metrics can be passed to an object (together with rmse and mea which will be used later for safety stocks modelling)...
+
+```{r}
+cust_metrics <- metric_set(rmse, mae, track_sig, bias_n, bias_c, bias_m, acc_95, se)
 ```
 
 ...and further to metric_set argument inside modeltime_nested_fit function.<br/>
@@ -782,6 +835,7 @@ check_bias_nested_tbl <- nested_data_tbl %>%
       wfl_prophet
     ),
     metric_set = cust_metrics, # custom metrics
+    conf_interval = 0.99,
     control = control_nested_fit(
       verbose = TRUE,
       allow_par = FALSE
@@ -797,14 +851,15 @@ check_bias_nested_tbl %>%
   filter(country == "Netherlands") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Netherlands: Models fit over test set horizon.')
+  ggtitle('Netherlands: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 Netherlands: custom error metrics' results.
 
@@ -812,7 +867,7 @@ Netherlands: custom error metrics' results.
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Netherlands') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 ```{r}
 check_bias_nested_tbl %>%
@@ -820,14 +875,15 @@ check_bias_nested_tbl %>%
   filter(country == "Greece") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Greece: Models fit over test set horizon.')
+  ggtitle('Greece: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 
 Greece: custom error metrics' results.
@@ -836,7 +892,7 @@ Greece: custom error metrics' results.
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Greece') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
 
@@ -846,14 +902,15 @@ check_bias_nested_tbl %>%
   filter(country == "Denmark") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Denmark: Models fit over test set horizon.')
+  ggtitle('Denmark: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 
 ```
 Denmark: Custom error metrics' results.
@@ -862,7 +919,7 @@ Denmark: Custom error metrics' results.
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Denmark') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
 ```{r}
@@ -871,14 +928,15 @@ check_bias_nested_tbl %>%
   filter(country == "UK") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('UK: Models fit over test set horizon.')
+  ggtitle('UK: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 
 ```
 UK: custom error metrics' results.
@@ -887,7 +945,7 @@ UK: custom error metrics' results.
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'UK') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 Additional metrics shed more light on the problem of BIAS and also on precision of our models. Results of metrics indicate that other 'best' models could be chosen if rmse was not a primary error criterion.<br/>
 
@@ -896,7 +954,7 @@ As for our analysis, let's stick to rmse taking into account high precision of m
 
 ##### Refitting models and forecasting future months.
 
-Best models can now be refit on full dataset (train + test) using modeltime_nested_refit function from modeltime library.
+Best models can now be refit on full dataset (train + test) using modeltime_nested_refit function from modeltime library. Parallel processing should kick in automatically, but it is recommended to set up a Parallel Backend with parallel_start() function.
 
 ```{r}
 nested_best_refit_tbl <- nested_best_tbl %>%
@@ -923,14 +981,163 @@ nested_best_refit_tbl %>%
                           )
 ```
 
-Quick visual inspection tells that forecast for most countries looks fine. Exception is Greece where it doesn't follow upward trend. This can suggest that Exponential Smoothing method should be changed for other model - one with similar precision and less evident negative BIAS (XGBoost) maybe?
+Quick visual inspection tells that forecast for most countries looks fine. Exception is Greece where it doesn't follow upward trend. This can suggest that Exponential Smoothing method should be changed for other model - one with similar precision and less evident negative BIAS (XGBoost) maybe?<br/>
+
+Modeltime library provides yet another useful function - modeltime_nested_forecast, which allows quick change of forecast horizon with argument 'h'. In below example, we change forecast horizon from 12 to 18 months.
+
+```{r}
+new_forecast_tbl <- nested_best_refit_tbl %>%
+  modeltime_nested_forecast(
+    h = 18,
+    conf_interval = 0.99,
+    control = control_nested_forecast(
+      verbose = FALSE,
+      allow_par = TRUE
+      )
+  )
+```
+
 
 
 ##### Safety stock modelling using expected forecast errors
 <br/>
 
-To model safety stock invaluable information is distribution of expected errors from test set horizon per country.<br/>
-Let's visualize them one more time.
+To model safety stock as buffer for demand volatility, invaluable information is expected forecast error.<br/>
+Contrary to BIAS-related topics, error will be calculated as actual - estimate (forecast). This is important distinction focuses on the risk to customer service coming from underforecasting (any time actual is higher than prediction).
+
+There's multiple ways to calculate safety stocks to protect against demand inaccuracy, mostly related to selection of error metric and calculation of safety factor (difference comes from the type of distribution of the error). <br/>
+We'll investigate a couple of scenarios aiming to achieve 99% of customer service level and to simplify, we'll assume normal distribution of the error:<br/>
+1. rmse as error metric,
+2. mea as error metric,
+3. use the difference between upper level of confidence interval and forecast as safety stock level.
+
+Let's first visualize forecast errors.
+
+We can use previously created vis_table object filtered for countries in scope. In this step we can also calculate the difference between upper value of confidence interval and forecast.
+
+```{r}
+four_countries <- vis_table %>%
+  dplyr::filter(country %in% c('Netherlands', 'Greece', 'Denmark', 'UK')) %>%
+  mutate(error = actual - prediction,  # overwrite error 
+         safety_stock_ci = conf_high - prediction) # diff between conf_high and forecast
+  
+
+four_countries %>%
+  ggplot(group = country) +
+  geom_point(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = error, color = .model_desc.y)) +
+  theme_minimal() +
+  facet_wrap(.~ country, ncol = 2, scales = 'free_y') +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
+  ggtitle('Best models: monthly errors over test set horizon.')
+
+```
+rmse and mae can be extracted from models error's metrics (we'll pick lowest rmse from each country).<br/>
+For calculation of safety factor, we'll use qnorm function providing required service level of 99%. Required safety stock will be calculated by multiplying both values.<br/>
+This will require some data manipulation.<br/>
+
+```{r}
+
+alpha = 0.01
+
+(safety_stocks <- check_bias_nested_tbl %>%
+   extract_nested_test_accuracy() %>%
+   select(country, .model_desc, rmse, mae) %>%
+   group_by(country) %>%
+   mutate(min_rmse = min(rmse)) %>%
+   filter(rmse == min_rmse) %>%
+   mutate(safety_factor = qnorm(1-alpha), # normal_distr
+          safety_stock_rmse = rmse * safety_factor,
+          safety_stock_mae = mae * safety_factor,
+          ) %>%
+   select(-c(min_rmse, .model_desc))
+)
+  
+```
+
+Let's add safety stocks to table with errors and visualize it.
+
+```{r}
+
+four_countries_all <- four_countries %>%
+    left_join(safety_stocks,
+            by = c('country'),
+            keep = FALSE)
+
+four_countries_all %>%
+  ggplot() +
+  geom_point(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = safety_stock_rmse), 
+            color = 'black', 
+            show.legend = TRUE, 
+            linetype = 'dashed') +
+  geom_line(aes(x = .index, y = safety_stock_mae), 
+            color = 'red',
+            linetype = 'dashed') +
+  geom_line(aes(x = .index, y = safety_stock_ci), 
+            color = 'blue',
+            linetype = 'dashed') +
+  theme_minimal() +
+  facet_wrap(.~ country, ncol = 2, scales = 'free_y') +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
+  ggtitle('Best models: monthly errors and rmse-based safety stocks.')
+```
+Black horizontal line represents rmse-based safety stocks, red line is mae-based safety stock and blue line is ci-based safety stock.
+mae provides lowest safety stock, which is in line with nature of this metric. It's not outliers sensitive like rmse, which penalizes high errors. ci-based safety stock seems to provide full protection against underforecasting.<br/>
+
+Let's calculate actual service level over test horizon for each safety stock level.<br/>
+For each level of safety stocks we'll first calculate portion of monthly actual demand above it and compare it with total actual demand to calculate % of fill rate.
 
 
-TO BE CONTINUED.
+```{r}
+four_countries_all %>%
+  select(actual, country, error, safety_stock_rmse, safety_stock_mae, safety_stock_ci) %>%
+  mutate(
+    uncovered_rmse = if_else(safety_stock_rmse - error < 0, 
+                            abs(safety_stock_rmse - error),
+                            0),
+    uncovered_mae = if_else(safety_stock_mae - error < 0, 
+                            abs(safety_stock_mae - error),
+                            0),
+    uncovered_ci = if_else(safety_stock_ci - error < 0, 
+                            abs(safety_stock_ci - error),
+                            0)
+  ) %>%
+  group_by(country) %>%
+  summarise(total_actual = sum(actual),
+         total_uncovered_rmse = sum(uncovered_rmse),
+         total_uncovered_mae = sum(uncovered_mae),
+         total_uncovered_ci = sum(uncovered_ci),
+         service_level_rmse = (total_actual - total_uncovered_rmse)/total_actual,
+         service_level_mae = (total_actual - total_uncovered_mae)/total_actual,
+         service_level_ci = (total_actual - total_uncovered_ci)/total_actual) %>%
+  select(country, service_level_rmse, service_level_mae, service_level_ci) %>%
+  mutate_at(2:4, round, 4)
+```
+
+With quick glance at above table we can tell that all safety stock levels provide required (or actually higher) service level (here interpreted as fill rate). <br/>
+**In this case we can select mae-based safety stocks, which will be the least costly option.**<br/>
+
+
+### SUMMARY
+<br/>
+
+
+As we've seen through the course of this project, R provides all necessary tools to build advanced and scalable demand forecasting models, both based on classic time series analysis and machine learning algorithms.<br/>
+
+In this project we've:<br/>
+1. described standard approach to demand forecasting using train, test and future datasets,<br/>
+2. built five different models per country,<br/>
+3. used one of provided numeric error metric to select model that minimizes the error,<br/>
+4. showed how to create customized metrics that focuses on BIAS and precision of forecast,<br/>
+5. forecasted future demand and showed how to change demand horizon if needed,<br/>
+6. on the basis of expected error, explored different ways to calculate safety stocks to achieve required service level,<br/>
+7. provided a method to select preferred safety stock.
+

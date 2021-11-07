@@ -36,6 +36,7 @@ library('lubridate')
 library('workflowsets')
 library('tune')
 library('patchwork')
+library('wesanderson')
 ```
 
 Key libraries used in this project are modeltime and tidymodels, both
@@ -499,6 +500,11 @@ that, good practice is to fit them on a single dataset (country) and
 inspect for any potential errors (usually driven by data quality, namely
 completeness). Let’s do it!<br/>
 
+One of the argument of this function, important for our analysis is
+conf_interval which can be interpret as range of possible outcomes for a
+prediction calculated at certain probability. Default value of
+probability is 0.95, let’s change it to 0.99.
+
 To check for errors we can use below code.
 
 ``` r
@@ -510,9 +516,9 @@ try_sample_tbl %>%
     ## # ... with 4 variables: country <chr>, .model_id <int>, .model_desc <chr>,
     ## #   .error_desc <chr>
 
-Our workflows are errors-free so let’s fit them on full dataset. Fitting
-models can take some time. We can shorten it allowing parallel run on
-PC’s cores. To do that (and first to check for number of cores,
+Our workflows are errors-free so let’s fit them on full dataset.<br/>
+Fitting models can take some time. We can shorten it allowing parallel
+run on PC’s cores. To do that (and first to check for number of cores,
 functions from parallel library can be used - commented out in below
 code). Alternatively we can set allow_par argument to TRUE will have
 similar effect (although recommended is using parallel_start() function
@@ -536,6 +542,7 @@ nested_modeltime_tbl <- nested_data_tbl %>%
       wfl_arima,
       wfl_prophet
     ),
+    conf_interval = 0.99,
     control = control_nested_fit(
       verbose = FALSE,
       allow_par = FALSE
@@ -565,12 +572,12 @@ nested_modeltime_tbl %>%
     ## # A tibble: 60 x 10
     ##    country .model_id .model_desc  .type   mae  mape  mase smape  rmse   rsq
     ##    <chr>       <int> <chr>        <chr> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
-    ##  1 Belgium         1 XGBOOST      Test  213.   2.68 0.599  2.73 293.  0.840
+    ##  1 Belgium         1 XGBOOST      Test  216.   2.72 0.606  2.77 294.  0.840
     ##  2 Belgium         2 TEMPORAL HI~ Test  166.   2.19 0.466  2.17 194.  0.933
     ##  3 Belgium         3 ETSMAA       Test  145.   1.91 0.409  1.90 181.  0.928
     ##  4 Belgium         4 ARIMA        Test  182.   2.41 0.512  2.38 220.  0.918
     ##  5 Belgium         5 PROPHET      Test  130.   1.71 0.367  1.71 164.  0.932
-    ##  6 Denmark         1 XGBOOST      Test   71.4  2.22 0.354  2.26  95.8 0.944
+    ##  6 Denmark         1 XGBOOST      Test   71.4  2.22 0.354  2.26  96.2 0.945
     ##  7 Denmark         2 TEMPORAL HI~ Test   60.8  1.96 0.302  1.99  77.5 0.970
     ##  8 Denmark         3 ETSMADA      Test   63.0  2.02 0.313  2.06  79.5 0.970
     ##  9 Denmark         4 ARIMA        Test   88.0  2.75 0.436  2.81 108.  0.964
@@ -685,12 +692,16 @@ vis_table %>%
   ggplot(group = country) +
   geom_line(aes(x = .index, y = actual)) +
   geom_line(aes(x = .index, y = prediction, color = .model_desc.y)) +
-  geom_line(aes(x = .index, y = conf_low), color = 'lightgrey') +
-  geom_line(aes(x = .index, y = conf_high), color = 'lightgrey') +
+  geom_line(aes(x = .index, y = conf_low), 
+            color = 'lightgrey') +
+  geom_line(aes(x = .index, y = conf_high), 
+            color = 'lightgrey') +
   theme_minimal() +
   facet_wrap(.~ country, ncol = 3, scales = 'free_y') +
   labs(color = 'model') +
-  theme(legend.position = 'bottom', plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
   ggtitle('Best models fit over test set horizon.')
 ```
 
@@ -812,7 +823,10 @@ we’ll build a few simple BIAS-oriented metrics and accuracy-oriented
 metrics to invest forecast precision.
 
 We’ll create 5 metrics following same steps (described through
-comments):<br/>
+comments):<br/> Four of them will be BIAS-related, one focusing on
+precision and in addition we’ll calculate standard error (se) which
+could be used for evaluation of different boundaries of confidence
+interval.
 
 1.  tracking signal - sum of errors divided by mean absolute deviation
     (error); this is approach described in APICS CPIM; acceptable value
@@ -1023,10 +1037,56 @@ acc_95.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
 }
 ```
 
-Such created custom metrics can be passed to an object…
+6.  standard error of forecast - used to calculate confidence intervals
+    at given alpha; we’ll use it later for safety stock modelling.
+    Please note that although ‘truth’ argument is not used in metric
+    calculation, it still needs to be passed to the function in order to
+    use this framework.
 
 ``` r
-cust_metrics <- metric_set(rmse, track_sig, bias_n, bias_c, bias_m, acc_95)
+se_v <- function(truth, estimate, na_rm = TRUE, ...) {
+
+  se_v_impl <- function(truth, estimate) {
+
+    m <- sd(estimate)
+    n <- length(estimate)
+    se <- m/sqrt(n)
+    return(se)
+  }
+  metric_vec_template(
+    metric_impl = se_v_impl,
+    truth = truth,
+    estimate = estimate,
+    na_rm = na_rm,
+    cls = "numeric",
+    ...
+  )
+}
+
+se <- function(data, ...) {
+  UseMethod("se")
+}
+
+se <- new_numeric_metric(se, direction = "minimize")
+
+se.data.frame <- function(data, truth, estimate, na_rm = TRUE, ...) {
+  metric_summarizer(
+    metric_nm = "se",
+    metric_fn = se_v,
+    data = data,
+    truth = !! enquo(truth),
+    estimate = !! enquo(estimate),
+    na_rm = na_rm,
+    ...
+  )
+}
+```
+
+Such created custom metrics can be passed to an object (together with
+rmse and mea which will be used later for safety stocks modelling)…
+
+``` r
+cust_metrics <- metric_set(rmse, mae, track_sig, bias_n, bias_c, bias_m, acc_95, se)
 ```
 
 …and further to metric_set argument inside modeltime_nested_fit
@@ -1045,6 +1105,7 @@ check_bias_nested_tbl <- nested_data_tbl %>%
       wfl_prophet
     ),
     metric_set = cust_metrics, # custom metrics
+    conf_interval = 0.99,
     control = control_nested_fit(
       verbose = TRUE,
       allow_par = FALSE
@@ -1064,34 +1125,35 @@ check_bias_nested_tbl %>%
   filter(country == "Netherlands") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Netherlands: Models fit over test set horizon.')
+  ggtitle('Netherlands: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-39-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-40-1.png)<!-- -->
 Netherlands: custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Netherlands') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
     ## # A tibble: 5 x 9
-    ##   country  .model_desc    .type  rmse track_sig bias_n bias_c bias_m acc_95
-    ##   <chr>    <chr>          <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
-    ## 1 Netherl~ XGBOOST        Test   202.     -24.0    -22 -3421.  -143.  1    
-    ## 2 Netherl~ TEMPORAL HIER~ Test   228.      18.9     16  3730.   155.  1    
-    ## 3 Netherl~ ETSMAA         Test   239.      18.2     16  3757.   157.  1    
-    ## 4 Netherl~ ARIMA          Test   237.      19.7     16  4000.   167.  1    
-    ## 5 Netherl~ PROPHET        Test   314.      21.7     18  5849.   244.  0.833
+    ##   .model_desc        rmse   mae track_sig bias_n bias_c bias_m acc_95    se
+    ##   <chr>             <dbl> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl> <dbl>
+    ## 1 XGBOOST            200.  140.     -24.0    -22 -3352.  -140.  1      86.2
+    ## 2 TEMPORAL HIERARC~  228.  198.      18.9     16  3730.   155.  1      89.5
+    ## 3 ETSMAA             239.  206.      18.2     16  3757.   157.  1      85.3
+    ## 4 ARIMA              237.  203.      19.7     16  4000.   167.  1      89.5
+    ## 5 PROPHET            314.  270.      21.7     18  5849.   244.  0.833  86.4
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1099,17 +1161,18 @@ check_bias_nested_tbl %>%
   filter(country == "Greece") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Greece: Models fit over test set horizon.')
+  ggtitle('Greece: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-41-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-42-1.png)<!-- -->
 
 Greece: custom error metrics’ results.
 
@@ -1117,17 +1180,17 @@ Greece: custom error metrics’ results.
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Greece') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
     ## # A tibble: 5 x 9
-    ##   country .model_desc     .type  rmse track_sig bias_n bias_c bias_m acc_95
-    ##   <chr>   <chr>           <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
-    ## 1 Greece  XGBOOST         Test   227.     -12.7     -2 -2114.  -88.1  0.75 
-    ## 2 Greece  TEMPORAL HIERA~ Test   268.      22.3     20  5072.  211.   0.542
-    ## 3 Greece  ETSMADM         Test   188.     -15.4     -8 -2105.  -87.7  0.792
-    ## 4 Greece  ARIMA           Test   276.      20.8     18  4887.  204.   0.583
-    ## 5 Greece  PROPHET         Test   310.      15.2     14  3911.  163.   0.542
+    ##   .model_desc        rmse   mae track_sig bias_n bias_c bias_m acc_95    se
+    ##   <chr>             <dbl> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl> <dbl>
+    ## 1 XGBOOST            223.  165.     -12.0     -2 -1992.  -83.0  0.75   75.2
+    ## 2 TEMPORAL HIERARC~  268.  227.      22.3     20  5072.  211.   0.542  77.9
+    ## 3 ETSMADM            188.  137.     -15.4     -8 -2105.  -87.7  0.792  65.5
+    ## 4 ARIMA              276.  235.      20.8     18  4887.  204.   0.583  77.1
+    ## 5 PROPHET            310.  258.      15.2     14  3911.  163.   0.542  50.7
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1135,34 +1198,35 @@ check_bias_nested_tbl %>%
   filter(country == "Denmark") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('Denmark: Models fit over test set horizon.')
+  ggtitle('Denmark: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-43-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-44-1.png)<!-- -->
 Denmark: Custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'Denmark') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
     ## # A tibble: 5 x 9
-    ##   country .model_desc     .type  rmse track_sig bias_n bias_c bias_m acc_95
-    ##   <chr>   <chr>           <chr> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl>
-    ## 1 Denmark XGBOOST         Test   96.0     -18.0     -6 -1286.  -53.6  0.875
-    ## 2 Denmark TEMPORAL HIERA~ Test   77.5     -20.9    -18 -1271.  -53.0  0.958
-    ## 3 Denmark ETSMADA         Test   79.5     -21.0    -18 -1327.  -55.3  0.958
-    ## 4 Denmark ARIMA           Test  108.      -23.4    -20 -2057.  -85.7  0.875
-    ## 5 Denmark PROPHET         Test  104.      -23.4    -20 -1987.  -82.8  0.958
+    ##   .model_desc        rmse   mae track_sig bias_n bias_c bias_m acc_95    se
+    ##   <chr>             <dbl> <dbl>     <dbl>  <dbl>  <dbl>  <dbl>  <dbl> <dbl>
+    ## 1 XGBOOST            96.0  71.8     -17.7     -6 -1271.  -53.0  0.875  62.7
+    ## 2 TEMPORAL HIERARC~  77.5  60.8     -20.9    -18 -1271.  -53.0  0.958  68.0
+    ## 3 ETSMADA            79.5  63.0     -21.0    -18 -1327.  -55.3  0.958  67.6
+    ## 4 ARIMA             108.   88.0     -23.4    -20 -2057.  -85.7  0.875  62.5
+    ## 5 PROPHET           104.   84.7     -23.4    -20 -1987.  -82.8  0.958  66.6
 
 ``` r
 check_bias_nested_tbl %>%
@@ -1170,34 +1234,35 @@ check_bias_nested_tbl %>%
   filter(country == "UK") %>%
   filter(.index >= as.Date('2002-06-01')) %>%
   ggplot() +
-  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 2) +
+  geom_line(aes(x = .index, y = .value, color = .model_desc), size = 1.5) +
   theme_minimal() +
   labs(color = 'model') +
   theme(legend.position = 'bottom', 
         plot.title = element_text(hjust = 0.5), 
         axis.title.x = element_blank()
         ) +
-  ggtitle('UK: Models fit over test set horizon.')
+  ggtitle('UK: Models fit over test set horizon.') +
+  scale_color_brewer(palette = 'RdGy')
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-45-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-46-1.png)<!-- -->
 UK: custom error metrics’ results.
 
 ``` r
 check_bias_nested_tbl %>%
   extract_nested_test_accuracy() %>%
   filter(country == 'UK') %>%
-  select(!.model_id)
+  select(-c(country, .model_id, .type))
 ```
 
     ## # A tibble: 5 x 9
-    ##   country .model_desc    .type  rmse track_sig bias_n  bias_c bias_m acc_95
-    ##   <chr>   <chr>          <chr> <dbl>     <dbl>  <dbl>   <dbl>  <dbl>  <dbl>
-    ## 1 UK      XGBOOST        Test  2021.    -16.3      -6 -22536.  -939.  0.792
-    ## 2 UK      TEMPORAL HIER~ Test  1419.     -5.90     -2  -6227.  -259.  0.708
-    ## 3 UK      ETSMAA         Test  1387.     -4.05      0  -4203.  -175.  0.75 
-    ## 4 UK      ARIMA          Test  1486.      5.16      8   5964.   249.  0.75 
-    ## 5 UK      PROPHET        Test  1353.      7.63     10   8365.   349.  0.792
+    ##   .model_desc       rmse   mae track_sig bias_n  bias_c bias_m acc_95    se
+    ##   <chr>            <dbl> <dbl>     <dbl>  <dbl>   <dbl>  <dbl>  <dbl> <dbl>
+    ## 1 XGBOOST          2012. 1380.    -16.0      -6 -22092.  -920.  0.792  693.
+    ## 2 TEMPORAL HIERAR~ 1419. 1056.     -5.90     -2  -6227.  -259.  0.708  883.
+    ## 3 ETSMAA           1387. 1037.     -4.05      0  -4203.  -175.  0.75   884.
+    ## 4 ARIMA            1486. 1156.      5.16      8   5964.   249.  0.75   733.
+    ## 5 PROPHET          1353. 1097.      7.63     10   8365.   349.  0.792  879.
 
 Additional metrics shed more light on the problem of BIAS and also on
 precision of our models. Results of metrics indicate that other ‘best’
@@ -1210,7 +1275,9 @@ flexibility in terms of development of custom metrics.
 ##### Refitting models and forecasting future months.
 
 Best models can now be refit on full dataset (train + test) using
-modeltime_nested_refit function from modeltime library.
+modeltime_nested_refit function from modeltime library. Parallel
+processing should kick in automatically, but it is recommended to set up
+a Parallel Backend with parallel_start() function.
 
 ``` r
 nested_best_refit_tbl <- nested_best_tbl %>%
@@ -1243,20 +1310,208 @@ nested_best_refit_tbl %>%
                           )
 ```
 
-![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-48-1.png)<!-- -->
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-49-1.png)<!-- -->
 
 Quick visual inspection tells that forecast for most countries looks
 fine. Exception is Greece where it doesn’t follow upward trend. This can
 suggest that Exponential Smoothing method should be changed for other
 model - one with similar precision and less evident negative BIAS
-(XGBoost) maybe?
+(XGBoost) maybe?<br/>
+
+Modeltime library provides yet another useful function -
+modeltime_nested_forecast, which allows quick change of forecast horizon
+with argument ‘h’. In below example, we change forecast horizon from 12
+to 18 months.
+
+``` r
+new_forecast_tbl <- nested_best_refit_tbl %>%
+  modeltime_nested_forecast(
+    h = 18,
+    conf_interval = 0.99,
+    control = control_nested_forecast(
+      verbose = FALSE,
+      allow_par = TRUE
+      )
+  )
+```
 
 ##### Safety stock modelling using expected forecast errors
 
 <br/>
 
-To model safety stock invaluable information is distribution of expected
-errors from test set horizon per country.<br/> Let’s visualize them one
-more time.
+To model safety stock as buffer for demand volatility, invaluable
+information is expected forecast error.<br/> Contrary to BIAS-related
+topics, error will be calculated as actual - estimate (forecast). This
+is important distinction focuses on the risk to customer service coming
+from underforecasting (any time actual is higher than prediction).
 
-TO BE CONTINUED.
+There’s multiple ways to calculate safety stocks to protect against
+demand inaccuracy, mostly related to selection of error metric and
+calculation of safety factor (difference comes from the type of
+distribution of the error). <br/> We’ll investigate a couple of
+scenarios aiming to achieve 99% of customer service level and to
+simplify, we’ll assume normal distribution of the error:<br/> 1. rmse as
+error metric, 2. mea as error metric, 3. use the difference between
+upper level of confidence interval and forecast as safety stock level.
+
+Let’s first visualize forecast errors.
+
+We can use previously created vis_table object filtered for countries in
+scope. In this step we can also calculate the difference between upper
+value of confidence interval and forecast.
+
+``` r
+four_countries <- vis_table %>%
+  dplyr::filter(country %in% c('Netherlands', 'Greece', 'Denmark', 'UK')) %>%
+  mutate(error = actual - prediction,  # overwrite error 
+         safety_stock_ci = conf_high - prediction) # diff between conf_high and forecast
+  
+
+four_countries %>%
+  ggplot(group = country) +
+  geom_point(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = error, color = .model_desc.y)) +
+  theme_minimal() +
+  facet_wrap(.~ country, ncol = 2, scales = 'free_y') +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
+  ggtitle('Best models: monthly errors over test set horizon.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-51-1.png)<!-- -->
+rmse and mae can be extracted from models error’s metrics (we’ll pick
+lowest rmse from each country).<br/> For calculation of safety factor,
+we’ll use qnorm function providing required service level of 99%.
+Required safety stock will be calculated by multiplying both
+values.<br/> This will require some data manipulation.<br/>
+
+``` r
+alpha = 0.01
+
+(safety_stocks <- check_bias_nested_tbl %>%
+   extract_nested_test_accuracy() %>%
+   select(country, .model_desc, rmse, mae) %>%
+   group_by(country) %>%
+   mutate(min_rmse = min(rmse)) %>%
+   filter(rmse == min_rmse) %>%
+   mutate(safety_factor = qnorm(1-alpha), # normal_distr
+          safety_stock_rmse = rmse * safety_factor,
+          safety_stock_mae = mae * safety_factor,
+          ) %>%
+   select(-c(min_rmse, .model_desc))
+)
+```
+
+    ## # A tibble: 4 x 6
+    ## # Groups:   country [4]
+    ##   country       rmse    mae safety_factor safety_stock_rm~ safety_stock_mae
+    ##   <chr>        <dbl>  <dbl>         <dbl>            <dbl>            <dbl>
+    ## 1 Denmark       77.5   60.8          2.33             180.             141.
+    ## 2 Greece       188.   137.           2.33             437.             319.
+    ## 3 Netherlands  200.   140.           2.33             465.             325.
+    ## 4 UK          1353.  1097.           2.33            3148.            2551.
+
+Let’s add safety stocks to table with errors and visualize it.
+
+``` r
+four_countries_all <- four_countries %>%
+    left_join(safety_stocks,
+            by = c('country'),
+            keep = FALSE)
+
+four_countries_all %>%
+  ggplot() +
+  geom_point(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = error, color = .model_desc.y)) +
+  geom_line(aes(x = .index, y = safety_stock_rmse), 
+            color = 'black', 
+            show.legend = TRUE, 
+            linetype = 'dashed') +
+  geom_line(aes(x = .index, y = safety_stock_mae), 
+            color = 'red',
+            linetype = 'dashed') +
+  geom_line(aes(x = .index, y = safety_stock_ci), 
+            color = 'blue',
+            linetype = 'dashed') +
+  theme_minimal() +
+  facet_wrap(.~ country, ncol = 2, scales = 'free_y') +
+  labs(color = 'model') +
+  theme(legend.position = 'bottom', 
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank()) +
+  ggtitle('Best models: monthly errors and rmse-based safety stocks.')
+```
+
+![](Scalable_Demand_Forecasting_files/figure-gfm/unnamed-chunk-53-1.png)<!-- -->
+Black horizontal line represents rmse-based safety stocks, red line is
+mae-based safety stock and blue line is ci-based safety stock. mae
+provides lowest safety stock, which is in line with nature of this
+metric. It’s not outliers sensitive like rmse, which penalizes high
+errors. ci-based safety stock seems to provide full protection against
+underforecasting.<br/>
+
+Let’s calculate actual service level over test horizon for each safety
+stock level.<br/> For each level of safety stocks we’ll first calculate
+portion of monthly actual demand above it and compare it with total
+actual demand to calculate % of fill rate.
+
+``` r
+four_countries_all %>%
+  select(actual, country, error, safety_stock_rmse, safety_stock_mae, safety_stock_ci) %>%
+  mutate(
+    uncovered_rmse = if_else(safety_stock_rmse - error < 0, 
+                            abs(safety_stock_rmse - error),
+                            0),
+    uncovered_mae = if_else(safety_stock_mae - error < 0, 
+                            abs(safety_stock_mae - error),
+                            0),
+    uncovered_ci = if_else(safety_stock_ci - error < 0, 
+                            abs(safety_stock_ci - error),
+                            0)
+  ) %>%
+  group_by(country) %>%
+  summarise(total_actual = sum(actual),
+         total_uncovered_rmse = sum(uncovered_rmse),
+         total_uncovered_mae = sum(uncovered_mae),
+         total_uncovered_ci = sum(uncovered_ci),
+         service_level_rmse = (total_actual - total_uncovered_rmse)/total_actual,
+         service_level_mae = (total_actual - total_uncovered_mae)/total_actual,
+         service_level_ci = (total_actual - total_uncovered_ci)/total_actual) %>%
+  select(country, service_level_rmse, service_level_mae, service_level_ci) %>%
+  mutate_at(2:4, round, 4)
+```
+
+    ## # A tibble: 4 x 4
+    ##   country     service_level_rmse service_level_mae service_level_ci
+    ##   <chr>                    <dbl>             <dbl>            <dbl>
+    ## 1 Denmark                   1.00             0.999                1
+    ## 2 Greece                    1.00             0.998                1
+    ## 3 Netherlands               1.00             0.998                1
+    ## 4 UK                        1                1.00                 1
+
+With quick glance at above table we can tell that all safety stock
+levels provide required (or actually higher) service level (here
+interpreted as fill rate). <br/> **In this case we can select mae-based
+safety stocks, which will be the least costly option.**<br/>
+
+### SUMMARY
+
+<br/>
+
+As we’ve seen through the course of this project, R provides all
+necessary tools to build advanced and scalable demand forecasting
+models, both based on classic time series analysis and machine learning
+algorithms.<br/>
+
+In this project we’ve:<br/> 1. described standard approach to demand
+forecasting using train, test and future datasets,<br/> 2. built five
+different models per country,<br/> 3. used one of provided numeric error
+metric to select model that minimizes the error,<br/> 4. showed how to
+create customized metrics that focuses on BIAS and precision of
+forecast,<br/> 5. forecasted future demand and showed how to change
+demand horizon if needed,<br/> 6. on the basis of expected error,
+explored different ways to calculate safety stocks to achieve required
+service level,<br/> 7. provided a method to select preferred safety
+stock.
